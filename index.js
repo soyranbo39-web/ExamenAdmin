@@ -13,8 +13,9 @@ app.use((req, res, next)=>{
 })
 
 const pool = require('./connection')
+const purchasesRouter = require('./Purchases')
 app.get('/',(req,res)=>res.send('API de productos - funcionando'))
-const purchasesRouter = require('./purchases')
+
 app.use(purchasesRouter)
 
 app.get('/api/products',async(req,res)=>{
