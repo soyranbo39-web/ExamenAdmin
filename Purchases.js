@@ -80,3 +80,70 @@ function Purchase(rows){
   return compra
 }
 
+// POST 
+router.post('/api/Purchases', async (req, res) => {
+  const { user_id, status, details } = req.body
+  if(user_id == null || !status || details == null) return res.status(400).json({ error: 'Campos obligatorios: user_id, status, details' })
+
+  const validationError = Validaciondatalles(details)
+  if(validationError) return res.status(400).json({ error: validationError })
+
+  let aggregated
+  try{ aggregated = AgregarDetallesProduct(details) }catch(e){
+    if(e && e.status) return res.status(e.status).json({ error: e.message })
+    throw e
+  }
+
+  const total = R2(Array.from(details).reduce((s,d)=> s + (Number(d.quantity) * Number(d.price)), 0))
+  if(total > 3500) return res.status(400).json({ error: 'El total de la compra no puede pasar $3500' })
+
+  let conn
+  try{
+    conn = await pool.getConnection()
+    await conn.beginTransaction()
+
+    const [urows] = await conn.query('SELECT id FROM users WHERE id = ?', [user_id])
+    if(urows.length === 0){ throw { status:400, message: 'user_id no existe' } }
+
+    const productIds = Array.from(aggregated.keys()).map(Number).sort((a,b)=>a-b)
+    if(productIds.length > 0){
+      const placeholders = productIds.map(()=>'?').join(',')
+      const [prodRows] = await conn.query(`SELECT id, stock FROM products WHERE id IN (${placeholders}) FOR UPDATE`, productIds)
+      const stockById = Object.fromEntries(prodRows.map(r=>[r.id, r.stock]))
+
+      for(const [pid, info] of aggregated.entries()){
+        if(stockById[pid] == null) {
+          throw { status:400, message: `Producto no existe: ${pid}` }
+        }
+        if(stockById[pid] < info.quantity) {
+          throw { status:409, message: 'Stock insuficiente', product_id: pid }
+        }
+      }
+    }
+
+   
+    const [pRes] = await conn.query('INSERT INTO purchases (user_id, total, status, purchase_date) VALUES (?, ?, ?, NOW())', [user_id, total, status])
+    const purchaseId = pRes.insertId
+
+   
+    for(const d of details){
+      const subtotal = R2(Number(d.quantity) * Number(d.price))
+      await conn.query('INSERT INTO purchase_details (purchase_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)', [purchaseId, d.product_id, d.quantity, d.price, subtotal])
+    }
+
+    
+    for(const [pid, info] of aggregated.entries()){
+      await conn.query('UPDATE products SET stock = stock - ? WHERE id = ?', [info.quantity, pid])
+    }
+
+    await conn.commit()
+    res.status(201).json({ id: purchaseId })
+  }catch(err){
+    if(conn) await conn.rollback()
+    if(err && err.status) return res.status(err.status).json({ error: err.message, product_id: err.product_id })
+    console.error('/api/purchases POST error', err)
+    res.status(500).json({ error: 'Error interno' })
+  }finally{
+    if(conn) conn.release()
+  }
+})
