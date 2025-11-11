@@ -274,3 +274,62 @@ router.delete('/api/purchases/:id', async (req, res) => {
     conn.release()
   }
 })
+
+
+// GET 
+router.get('/api/purchases', async (req, res) => {
+  try{
+    const { estado, agrupar_por } = req.query
+    const whereClause = estado ? 'WHERE p.status = ?' : ''
+    const params = estado ? [estado] : []
+    const [rows] = await pool.query(
+      `SELECT
+        p.id as purchase_id, p.total, p.status, p.purchase_date, p.updated_at,
+        u.id as user_id, u.name as user_name,
+        d.id as detail_id, d.product_id, d.quantity, d.price, d.subtotal,
+        pr.name as product_name
+      FROM purchases p
+      JOIN users u ON u.id = p.user_id
+      JOIN purchase_details d ON d.purchase_id = p.id
+      JOIN products pr ON pr.id = d.product_id
+      ${whereClause}
+      ORDER BY p.id, d.id`,
+      params
+    )
+
+    const map = new Map()
+    for(const r of rows){
+      if(!map.has(r.purchase_id)){
+        map.set(r.purchase_id, {
+          id: r.purchase_id,
+          usuario: r.user_name,
+          usuario_id: r.user_id,
+          total: Number(r.total),
+          estado: r.status,
+          fecha_compra: r.purchase_date,
+          actualizado_en: r.updated_at,
+          detalles: []
+        })
+      }
+      const p = map.get(r.purchase_id)
+      p.detalles.push({
+        id: r.detail_id,
+        producto: r.product_name,
+        producto_id: r.product_id,
+        cantidad: r.quantity,
+        precio: Number(r.price),
+        subtotal: Number(r.subtotal)
+      })
+    }
+
+    const compras = Array.from(map.values())
+    if(agrupar_por === 'estado'){
+      const grouped = compras.reduce((acc,c)=>{ acc[c.estado] = acc[c.estado] || []; acc[c.estado].push(c); return acc }, {})
+      return res.json(grouped)
+    }
+    res.json(compras)
+  }catch(err){
+    console.error('/api/purchases GET error', err)
+    res.status(500).json({ error: 'Error interno' })
+  }
+})
