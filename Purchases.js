@@ -333,3 +333,21 @@ router.get('/api/purchases', async (req, res) => {
     res.status(500).json({ error: 'Error interno' })
   }
 })
+
+
+// GET 
+router.get('/api/purchases/:id', async (req, res) => {
+  const purchaseId = Number(req.params.id)
+  if(Number.isNaN(purchaseId)) return res.status(400).json({ error: 'id inválido' })
+  try{
+    const rows = await getPurchaseRows(pool, purchaseId)
+    if(rows.length===0) return res.status(404).json({ error: 'Compra no encontrada' })
+    const purchase = mapRowsToPurchase(rows)
+    res.json(purchase)
+  }catch(err){
+    console.error('/api/purchases/:id GET error', err)
+    res.status(500).json({ error: 'Error interno' })
+  }
+})
+
+module.exports = router
