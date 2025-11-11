@@ -147,3 +147,94 @@ router.post('/api/Purchases', async (req, res) => {
     if(conn) conn.release()
   }
 })
+
+
+
+// PUT 
+router.put('/api/purchases/:id', async (req, res) => {
+  const purchaseId = Number(req.params.id)
+  const { user_id, status, details } = req.body
+  if(Number.isNaN(purchaseId)) return res.status(400).json({ error: 'id inválido' })
+
+  const conn = await pool.getConnection()
+  try{
+    await conn.beginTransaction()
+
+    const [pRows] = await conn.query('SELECT id, total, status FROM purchases WHERE id = ? FOR UPDATE', [purchaseId])
+    if(pRows.length === 0){ await conn.rollback(); return res.status(404).json({ error: 'Compra no encontrada' }) }
+    const existing = pRows[0]
+    if(existing.status === 'COMPLETED'){ await conn.rollback(); return res.status(403).json({ error: 'No se puede modificar una compra COMPLETED' }) }
+
+    let newTotal = existing.total
+
+    if(details !== undefined){
+      const vErr = validateDetailsArray(details)
+      if(vErr){ await conn.rollback(); return res.status(400).json({ error: vErr }) }
+
+      let newAgg
+      try{ newAgg = aggregateDetails(details) }catch(e){ if(e && e.status){ await conn.rollback(); return res.status(e.status).json({ error: e.message }) } else throw e }
+
+      newTotal = round2(Array.from(details).reduce((s,d)=> s + (Number(d.quantity) * Number(d.price)), 0))
+      if(newTotal > 3500){ await conn.rollback(); return res.status(400).json({ error: 'El total de la compra no puede pasar $3500' }) }
+
+      
+      const [oldDetails] = await conn.query('SELECT product_id, quantity FROM purchase_details WHERE purchase_id = ?', [purchaseId])
+      const oldMap = new Map()
+      for(const od of oldDetails) oldMap.set(od.product_id, (oldMap.get(od.product_id)||0) + Number(od.quantity))
+
+
+      const unionIds = Array.from(new Set([ ...oldMap.keys(), ...newAgg.keys() ])).map(Number).sort((a,b)=>a-b)
+      if(unionIds.length>0){
+        const placeholders = unionIds.map(()=>'?').join(',')
+        const [prodRows] = await conn.query(`SELECT id, stock FROM products WHERE id IN (${placeholders}) FOR UPDATE`, unionIds)
+        const stockById = Object.fromEntries(prodRows.map(r=>[r.id, r.stock]))
+
+        for(const [pid, qty] of oldMap.entries()){
+          if(stockById[pid] == null) throw { status:400, message: `Producto no existe: ${pid}` }
+          stockById[pid] += qty
+        }
+        for(const [pid, info] of newAgg.entries()){
+          if(stockById[pid] == null) throw { status:400, message: `Producto no existe: ${pid}` }
+          if(stockById[pid] < info.quantity) throw { status:409, message: 'Stock insuficiente', product_id: pid }
+        }
+
+        for(const [pid, qty] of oldMap.entries()){
+          await conn.query('UPDATE products SET stock = stock + ? WHERE id = ?', [qty, pid])
+        }
+        await conn.query('DELETE FROM purchase_details WHERE purchase_id = ?', [purchaseId])
+        for(const d of details){
+          const subtotal = round2(Number(d.quantity) * Number(d.price))
+          await conn.query('INSERT INTO purchase_details (purchase_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)', [purchaseId, d.product_id, d.quantity, d.price, subtotal])
+        }
+        for(const [pid, info] of newAgg.entries()){
+          await conn.query('UPDATE products SET stock = stock - ? WHERE id = ?', [info.quantity, pid])
+        }
+      }
+    }
+
+    const fields = []
+    const values = []
+    if(user_id != null){
+      const [urows] = await conn.query('SELECT id FROM users WHERE id = ?', [user_id])
+      if(urows.length === 0){ await conn.rollback(); return res.status(400).json({ error: 'user_id no existe' }) }
+      fields.push('user_id = ?'); values.push(user_id)
+    }
+    if(status != null){ fields.push('status = ?'); values.push(status) }
+    if(details !== undefined){ fields.push('total = ?'); values.push(newTotal); fields.push('updated_at = NOW()') }
+    if(fields.length>0){
+      const sql = `UPDATE purchases SET ${fields.join(', ')} WHERE id = ?`
+      values.push(purchaseId)
+      await conn.query(sql, values)
+    }
+
+    await conn.commit()
+    res.json({ message: 'Actualizado' })
+  }catch(err){
+    await conn.rollback()
+    if(err && err.status) return res.status(err.status).json({ error: err.message, product_id: err.product_id })
+    console.error('/api/purchases PUT error', err)
+    res.status(500).json({ error: 'Error interno' })
+  }finally{
+    conn.release()
+  }
+})
